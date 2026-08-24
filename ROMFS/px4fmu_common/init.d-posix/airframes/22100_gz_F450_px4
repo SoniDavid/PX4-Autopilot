@@ -21,21 +21,28 @@ param set-default CA_ROTOR_COUNT 4
 
 # Rotor positions in FRD, from the F450_px4 link poses (FLU, y negated).
 # Must match the motor->link mapping in F450_px4/model.sdf.
+# KM and CT now match the SDF's momentConstant and C_T*maxRotVelocity^2; KM was 0.05 against
+# the SDF's 0.016, inherited from x500. Both are inert here - ActuatorEffectivenessRotors sets
+# normalize_rpy, so each column of the mix is divided by its own max and the scale cancels.
 param set-default CA_ROTOR0_PX 0.1589
 param set-default CA_ROTOR0_PY 0.1589
-param set-default CA_ROTOR0_KM 0.05
+param set-default CA_ROTOR0_KM 0.016
+param set-default CA_ROTOR0_CT 8.549
 
 param set-default CA_ROTOR1_PX -0.1589
 param set-default CA_ROTOR1_PY -0.1589
-param set-default CA_ROTOR1_KM 0.05
+param set-default CA_ROTOR1_KM 0.016
+param set-default CA_ROTOR1_CT 8.549
 
 param set-default CA_ROTOR2_PX 0.1589
 param set-default CA_ROTOR2_PY -0.1589
-param set-default CA_ROTOR2_KM -0.05
+param set-default CA_ROTOR2_KM -0.016
+param set-default CA_ROTOR2_CT 8.549
 
 param set-default CA_ROTOR3_PX -0.1589
 param set-default CA_ROTOR3_PY 0.1589
-param set-default CA_ROTOR3_KM -0.05
+param set-default CA_ROTOR3_KM -0.016
+param set-default CA_ROTOR3_CT 8.549
 
 param set-default SIM_GZ_EC_FUNC1 101
 param set-default SIM_GZ_EC_FUNC2 102
@@ -47,16 +54,18 @@ param set-default SIM_GZ_EC_MIN2 150
 param set-default SIM_GZ_EC_MIN3 150
 param set-default SIM_GZ_EC_MIN4 150
 
-param set-default SIM_GZ_EC_MAX1 1000
-param set-default SIM_GZ_EC_MAX2 1000
-param set-default SIM_GZ_EC_MAX3 1000
-param set-default SIM_GZ_EC_MAX4 1000
+param set-default SIM_GZ_EC_MAX1 1089
+param set-default SIM_GZ_EC_MAX2 1089
+param set-default SIM_GZ_EC_MAX3 1089
+param set-default SIM_GZ_EC_MAX4 1089
 
 # --- attitude and rate loop ---------------------------------------------------
 # PX4's defaults are the x500's. Rate gains scale with inertia/torque-arm: roll x2.30,
 # pitch x1.61, yaw x1.29 - roll is the soft axis, not pitch, because x500's arms are
 # asymmetric (PY 0.22 roll, PX 0.13 pitch) against the F450's 0.1589 on both. Re-derive if
 # the inertia, the arm positions or the motor constants change.
+# The yaw lag of 556 ms against roll's 244 is not explained by CA_ROTOR*_KM: that scale cancels
+# in the RPY normalisation. Still unexplained.
 param set-default MC_ROLLRATE_P 0.345
 param set-default MC_ROLLRATE_I 0.460
 param set-default MC_ROLLRATE_D 0.0069
@@ -72,14 +81,15 @@ param set-default MC_YAWRATE_I 0.129
 # the attitude lag but tripled the image-moment noise and lost lock sooner - the IBVS layer
 # minds moment noise far more than lag. The yaw drift is fixed in fixed_eso.cpp, not here.
 
-# Measured, not inherited: x500's nominal 0.60 left the aircraft 4.7 N short, and nothing
-# downstream of the ANFTIBVS corrects a bad thrust anchor. From the rotor command in steady
-# hover, (758.3-150)/(1000-150). Must equal px4_offboard_bridge's hover_thrust parameter.
-# Re-measure if the motor constants or the mass change.
-param set-default MPC_THR_HOVER 0.716
+# 4S with a 9545: T/W 2.07 at 2.0 kg. sitl.launch.py derives this and SIM_GZ_EC_MAX together
+# from battery_cells and overrides both via PX4_PARAM_*; these defaults are for a bare
+# px4_sitl_default run. Must equal px4_offboard_bridge's hover_thrust parameter.
+param set-default MPC_THR_HOVER 0.6461
 
-# zD in aibvs_pos_ctrl.cpp and aD in image_features.cpp are both calibrated for 2.5 m;
-# takeoff has to deliver the aircraft there or the feature vector is mis-scaled.
+# The servoing depth. sitl.launch.py derives image_features' aD from its zD:= argument and
+# pushes the same number in as PX4_PARAM_MIS_TAKEOFF_ALT, so this default is only for a bare
+# px4_sitl_default run. Takeoff has to deliver the aircraft to the depth aD was computed for
+# or the feature vector is mis-scaled from the first frame.
 param set-default MIS_TAKEOFF_ALT 2.5
 
 # Offboard loss = loss of visual lock; px4_offboard_bridge drops the stream on a stale
