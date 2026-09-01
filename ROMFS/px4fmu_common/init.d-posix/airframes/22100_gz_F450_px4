@@ -102,6 +102,26 @@ param set-default COM_OF_LOSS_T 1.0
 param set-default EKF2_DECL_TYPE 0
 param set-default EKF2_MAG_DECL 0
 
+# EKF2 gates mag heading fusion on "is yaw observable", i.e. horizontal acceleration above
+# EKF2_MAG_ACCLIM, whenever GNSS NE aiding is active (mag_control.cpp checkMagHeadingConsistency).
+# This aircraft station-keeps over a marker and never accelerates that hard, so heading aiding
+# dropped out ~21 s in and never returned: yaw then dead-reckoned on the gyro and the estimate
+# ran 33 deg off truth, which rotates Ryaw() inside pos_ctrl and fixed_eso. The gz magnetometer
+# is ideal and the world field uniform, so the heuristic is protecting against nothing here.
+param set-default EKF2_MAG_ACCLIM 0.0
+
+# The gz IMU is perfect by construction, so a learned calibration can only inject error.
+# SENS_IMU_AUTOCAL had written CAL_ACC0_XOFF -0.287 m/s^2 into rootfs/parameters.bson: 1.68 deg
+# of standing pitch bias, i.e. 0.27 m/s^2 of uncommanded forward acceleration on every flight.
+# `param set`, not set-default, because a saved value overrides a default.
+param set-default SENS_IMU_AUTOCAL 0
+param set CAL_ACC0_XOFF 0.0
+param set CAL_ACC0_YOFF 0.0
+param set CAL_ACC0_ZOFF 0.0
+param set CAL_GYRO0_XOFF 0.0
+param set CAL_GYRO0_YOFF 0.0
+param set CAL_GYRO0_ZOFF 0.0
+
 # No RC and no GCS in SITL. Without these, arming is blocked and the loss failsafes fire.
 param set-default COM_RC_IN_MODE 4
 param set-default NAV_DLL_ACT 0
