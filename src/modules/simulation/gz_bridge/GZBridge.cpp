@@ -41,9 +41,19 @@
 #include <px4_platform_common/getopt.h>
 
 #include <iostream>
+#include <chrono>
+#include <cstring>
 #include <string>
+#include <thread>
 
 ModuleBase::Descriptor GZBridge::desc{task_spawn, custom_command, print_usage};
+
+// How long to wait for a sensor's first message, and how many fresh subscribes to try. The wait is
+// WALL clock, not px4_usleep's simulated clock: RTF runs well under 1 while gz brings up rendering,
+// which stretched a 2 s budget past 30 s and let px4_takeoff_gate's 60 s timeout win the race.
+static constexpr int kSensorWaitStepUs = 25000;
+static constexpr int kSensorWaitMs = 2000;
+static constexpr int kSensorAttempts = 3;
 
 GZBridge::GZBridge(const std::string &world, const std::string &model_name) :
 	ModuleParams(nullptr),
@@ -64,46 +74,42 @@ GZBridge::~GZBridge()
 int GZBridge::init()
 {
 	// REQUIRED:
-	if (!subscribeClock(true)) {
+	// We must wait for clock before subscribing to other topics. This is because
+	// if we publish a 0 timestamp it screws up the EKF.
+	if (!subscribeVerified("clock", _realtime_clock_set, &GZBridge::subscribeClock, clockTopic())) {
 		return PX4_ERROR;
 	}
 
-	// We must wait for clock before subscribing to other topics. This is because
-	// if we publish a 0 timestamp it screws up the EKF.
-	while (1) {
-		px4_usleep(25000);
-
-		if (_realtime_clock_set) {
-			px4_usleep(25000);
-			break;
-		}
-	}
+	px4_usleep(kSensorWaitStepUs);
 
 	if (!subscribePoseInfo(true)) {
 		return PX4_ERROR;
 	}
 
-	// OPTIONAL:
+	// Each of these blocks arming when it is missing, so a dead stream must stop boot here rather
+	// than leave a blind aircraft that PX4 reports only as a preflight failure.
 	if (_sim_gz_en_imu.get()) {
-		if (!subscribeImu(false)) {
+		if (!subscribeVerified("imu", _imu_received, &GZBridge::subscribeImu, imuTopic())) {
 			return PX4_ERROR;
 		}
 	}
 
 	if (_sim_gz_en_mag.get()) {
-		if (!subscribeMag(false)) {
-			return PX4_ERROR;
-		}
-	}
-
-	if (_sim_gz_en_gps.get()) {
-		if (!subscribeNavsat(false)) {
+		if (!subscribeVerified("magnetometer", _mag_received, &GZBridge::subscribeMag, magTopic())) {
 			return PX4_ERROR;
 		}
 	}
 
 	if (_sim_gz_en_baro.get()) {
-		if (!subscribeAirPressure(false)) {
+		if (!subscribeVerified("barometer", _baro_received, &GZBridge::subscribeAirPressure,
+				       airPressureTopic())) {
+			return PX4_ERROR;
+		}
+	}
+
+	// OPTIONAL: NavSat races the same way, but GNSS aiding is off indoors and nothing waits on it.
+	if (_sim_gz_en_gps.get()) {
+		if (!subscribeNavsat(false)) {
 			return PX4_ERROR;
 		}
 	}
@@ -199,9 +205,68 @@ void GZBridge::Run()
 	ScheduleDelayed(10_ms);
 }
 
+std::string GZBridge::clockTopic() const
+{
+	return "/world/" + _world_name + "/clock";
+}
+
+std::string GZBridge::imuTopic() const
+{
+	return "/world/" + _world_name + "/model/" + _model_name + "/link/base_link/sensor/imu_sensor/imu";
+}
+
+std::string GZBridge::magTopic() const
+{
+	return "/world/" + _world_name + "/model/" + _model_name +
+	       "/link/base_link/sensor/magnetometer_sensor/magnetometer";
+}
+
+std::string GZBridge::airPressureTopic() const
+{
+	return "/world/" + _world_name + "/model/" + _model_name +
+	       "/link/base_link/sensor/air_pressure_sensor/air_pressure";
+}
+
+bool GZBridge::subscribeVerified(const char *label, const volatile bool &received,
+				 bool (GZBridge::*subscribe)(bool), const std::string &topic)
+{
+	// PX4 truncates a console line at 128 chars, which silently ate the end of these messages -
+	// and with it the marker tools/run.sh greps for. Name the sensor, not the whole topic path.
+	const size_t sensor_at = topic.rfind("/sensor/");
+	const char *tail = sensor_at == std::string::npos ? topic.c_str()
+			   : topic.c_str() + sensor_at + strlen("/sensor/");
+
+	for (int attempt = 1; attempt <= kSensorAttempts; attempt++) {
+		if (!(this->*subscribe)(true)) {
+			return false;
+		}
+
+		const auto deadline = std::chrono::steady_clock::now()
+				      + std::chrono::milliseconds(kSensorWaitMs);
+
+		while (std::chrono::steady_clock::now() < deadline) {
+			// A real sleep, not px4_usleep: under lockstep that blocks on the sim clock, so a
+			// stalled simulator would hang this loop instead of timing out.
+			std::this_thread::sleep_for(std::chrono::microseconds(kSensorWaitStepUs));
+
+			if (received) {
+				return true;
+			}
+		}
+
+		PX4_WARN("no %s data from %s after %d ms (attempt %d/%d), re-subscribing",
+			 label, tail, kSensorWaitMs, attempt, kSensorAttempts);
+		_node.Unsubscribe(topic);
+	}
+
+	PX4_ERR("no %s data from %s after %d attempts - the gz publisher never reached PX4",
+		label, tail, kSensorAttempts);
+	return false;
+}
+
 bool GZBridge::subscribeClock(bool required)
 {
-	std::string clock_topic = "/world/" + _world_name + "/clock";
+	std::string clock_topic = clockTopic();
 
 	if (!_node.Subscribe(clock_topic, &GZBridge::clockCallback, this)) {
 		PX4_ERR("failed to subscribe to %s", clock_topic.c_str());
@@ -225,7 +290,7 @@ bool GZBridge::subscribePoseInfo(bool required)
 
 bool GZBridge::subscribeImu(bool required)
 {
-	std::string imu_topic = "/world/" + _world_name + "/model/" + _model_name + "/link/base_link/sensor/imu_sensor/imu";
+	std::string imu_topic = imuTopic();
 
 	if (!_node.Subscribe(imu_topic, &GZBridge::imuCallback, this)) {
 		PX4_ERR("failed to subscribe to %s", imu_topic.c_str());
@@ -237,8 +302,7 @@ bool GZBridge::subscribeImu(bool required)
 
 bool GZBridge::subscribeMag(bool required)
 {
-	std::string mag_topic = "/world/" + _world_name + "/model/" + _model_name +
-				"/link/base_link/sensor/magnetometer_sensor/magnetometer";
+	std::string mag_topic = magTopic();
 
 	if (!_node.Subscribe(mag_topic, &GZBridge::magnetometerCallback, this)) {
 		PX4_ERR("failed to subscribe to %s", mag_topic.c_str());
@@ -301,8 +365,7 @@ bool GZBridge::subscribeAirspeed(bool required)
 
 bool GZBridge::subscribeAirPressure(bool required)
 {
-	std::string air_pressure_topic = "/world/" + _world_name + "/model/" + _model_name +
-					 "/link/base_link/sensor/air_pressure_sensor/air_pressure";
+	std::string air_pressure_topic = airPressureTopic();
 
 	if (!_node.Subscribe(air_pressure_topic, &GZBridge::airPressureCallback, this)) {
 		PX4_ERR("failed to subscribe to %s", air_pressure_topic.c_str());
@@ -395,6 +458,8 @@ void GZBridge::opticalFlowCallback(const px4::msgs::OpticalFlow &msg)
 
 void GZBridge::magnetometerCallback(const gz::msgs::Magnetometer &msg)
 {
+	_mag_received = true;
+
 	const uint64_t timestamp = hrt_absolute_time();
 
 	_px4_mag.set_temperature(_temperature); // this will be static if no airspeed sensor is on the model.
@@ -407,6 +472,8 @@ void GZBridge::magnetometerCallback(const gz::msgs::Magnetometer &msg)
 
 void GZBridge::airPressureCallback(const gz::msgs::FluidPressure &msg)
 {
+	_baro_received = true;
+
 	_px4_baro.set_temperature(_temperature); // this will be static if no airspeed sensor is on the model.
 	_px4_baro.update(hrt_absolute_time(), msg.pressure());
 }
@@ -434,6 +501,8 @@ void GZBridge::airspeedCallback(const gz::msgs::AirSpeed &msg)
 
 void GZBridge::imuCallback(const gz::msgs::IMU &msg)
 {
+	_imu_received = true;
+
 	const uint64_t timestamp = hrt_absolute_time();
 
 	// FLU -> FRD

@@ -123,6 +123,17 @@ private:
 	bool subscribeNavsat(bool required);
 	bool subscribeOpticalFlow(bool required);
 
+	// Topic names are derived from the SDF sensor names, so subscriber and verifier share one copy.
+	std::string clockTopic() const;
+	std::string imuTopic() const;
+	std::string magTopic() const;
+	std::string airPressureTopic() const;
+
+	// Node::Subscribe() succeeds on local registration alone, so a lost gz discovery handshake
+	// leaves PX4 silently deaf on one topic. Waits for the first message and re-subscribes.
+	bool subscribeVerified(const char *label, const volatile bool &received,
+			       bool (GZBridge::*subscribe)(bool), const std::string &topic);
+
 	void clockCallback(const gz::msgs::Clock &msg);
 	void airspeedCallback(const gz::msgs::AirSpeed &msg);
 	void airPressureCallback(const gz::msgs::FluidPressure &msg);
@@ -181,7 +192,11 @@ private:
 
 	float _temperature{15.0f}; // default temperature in Celsius
 
-	bool _realtime_clock_set{false};
+	// volatile: set from the gz transport callback threads, polled by subscribeVerified().
+	volatile bool _realtime_clock_set{false};
+	volatile bool _imu_received{false};
+	volatile bool _mag_received{false};
+	volatile bool _baro_received{false};
 	gz::transport::Node _node;
 
 	// GPS noise model
